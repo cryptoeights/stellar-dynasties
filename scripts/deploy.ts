@@ -9,7 +9,9 @@
 
 import { $ } from "bun";
 import { Keypair } from '@stellar/stellar-sdk';
-import { existsSync } from 'fs';
+import { unlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { readEnvFile, getEnvValue } from './utils/env';
 import { getWorkspaceContracts } from "./utils/contracts";
 
@@ -41,6 +43,22 @@ async function ensureTestnetFunded(address: string): Promise<void> {
   throw new Error(`Funded ${address} but it still doesn't appear on Horizon yet`);
 }
 
+async function testnetContractExists(contractId: string): Promise<boolean> {
+  const tmpPath = join(tmpdir(), `stellar-contract-${contractId}.wasm`);
+  try {
+    await $`stellar -q contract fetch --id ${contractId} --network ${NETWORK} --out-file ${tmpPath}`;
+    return true;
+  } catch {
+    return false;
+  } finally {
+    try {
+      await unlink(tmpPath);
+    } catch {
+      // Ignore missing temp file
+    }
+  }
+}
+
 const contracts = await getWorkspaceContracts();
 
 // Check required files exist
@@ -56,20 +74,19 @@ if (missingWasm.length > 0) {
 }
 
 // Create three testnet identities: admin, player1, player2
-// Only admin needs to be in the Stellar CLI for deployment
-// Player1 and player2 are just keypairs for frontend use
+// Admin signs deployments directly via secret key (no CLI identity required).
+// Player1 and player2 are keypairs for frontend dev use.
 const walletAddresses: Record<string, string> = {};
 const walletSecrets: Record<string, string> = {};
 
 // Load existing secrets from .env if available
 let existingSecrets: Record<string, string | null> = {
-  admin: null,
   player1: null,
   player2: null,
 };
 
 const existingEnv = await readEnvFile('.env');
-for (const identity of ['admin', 'player1', 'player2']) {
+for (const identity of ['player1', 'player2']) {
   const key = `VITE_DEV_${identity.toUpperCase()}_SECRET`;
   const v = getEnvValue(existingEnv, key);
   if (v && v !== 'NOT_AVAILABLE') existingSecrets[identity] = v;
@@ -77,58 +94,16 @@ for (const identity of ['admin', 'player1', 'player2']) {
 
 // Handle admin identity (needs to be in Stellar CLI for deployment)
 console.log('Setting up admin identity...');
+console.log('📝 Generating new admin identity...');
+const adminKeypair = Keypair.random();
+
+walletAddresses.admin = adminKeypair.publicKey();
+
 try {
-  let adminKeypair: Keypair;
-
-  // Check if we have an existing admin secret
-  if (existingSecrets.admin) {
-    console.log('✅ Using existing admin identity from .env');
-    adminKeypair = Keypair.fromSecret(existingSecrets.admin);
-  } else {
-    console.log('📝 Generating new admin identity...');
-    adminKeypair = Keypair.random();
-  }
-
-  const adminPublic = adminKeypair.publicKey();
-  const adminSecret = adminKeypair.secret();
-
-  walletAddresses.admin = adminPublic;
-  walletSecrets.admin = adminSecret;
-
-  // Check if admin is already in Stellar CLI
-  try {
-    const existingAddress = (await $`stellar keys address admin`.text()).trim();
-    if (existingAddress !== adminPublic) {
-      console.log('⚠️  Admin identity exists but address mismatch, recreating...');
-      await $`stellar keys rm admin`;
-      throw new Error('Need to recreate');
-    }
-    console.log(`✅ Admin identity in CLI: ${adminPublic}`);
-  } catch {
-    // Need to add admin to CLI
-    // Since we can't easily add by secret key, generate a new one and use that
-    if (!existingSecrets.admin) {
-      // First ensure admin is removed
-      try {
-        await $`stellar keys rm admin`.quiet();
-      } catch {}
-
-      // Generate new identity in CLI
-      console.log('Generating new admin identity in Stellar CLI...');
-      await $`stellar keys generate admin --network testnet --fund`.quiet();
-      const newAddress = (await $`stellar keys address admin`.text()).trim();
-      walletAddresses.admin = newAddress;
-      // We can't get the secret from CLI, so mark as NOT_AVAILABLE
-      // User will need to fund this manually
-      console.log(`✅ Admin identity created in CLI: ${newAddress}`);
-      console.log(`⚠️  Admin secret not available - deploy will use CLI signer`);
-      walletSecrets.admin = 'NOT_AVAILABLE';
-    } else {
-      throw new Error('Cannot add existing admin secret to CLI - please use stellar keys generate admin --network testnet manually');
-    }
-  }
+  await ensureTestnetFunded(walletAddresses.admin);
+  console.log('✅ admin funded');
 } catch (error) {
-  console.error(`❌ Failed to setup admin identity:`, error);
+  console.error('❌ Failed to ensure admin is funded. Deployment cannot proceed.');
   process.exit(1);
 }
 
@@ -158,16 +133,17 @@ for (const identity of ['player1', 'player2']) {
   }
 }
 
-// Save to deployment.json with secrets for setup script to use
-console.log("🔐 Secret keys will be saved to .env (gitignored)\n");
+// Save to deployment.json and .env for setup script to use
+console.log("🔐 Player secret keys will be saved to .env (gitignored)\n");
 
 console.log("💼 Wallet addresses:");
 console.log(`  Admin:   ${walletAddresses.admin}`);
 console.log(`  Player1: ${walletAddresses.player1}`);
 console.log(`  Player2: ${walletAddresses.player2}\n`);
 
-// Use admin identity for contract deployment
+// Use admin secret for contract deployment
 const adminAddress = walletAddresses.admin;
+const adminSecret = adminKeypair.secret();
 
 const deployed: Record<string, string> = {};
 
@@ -179,19 +155,23 @@ if (!mock) {
 }
 
 let mockGameHubId = EXISTING_GAME_HUB_TESTNET_CONTRACT_ID;
-deployed[mock.packageName] = mockGameHubId;
-console.log(`✅ Using existing ${mock.packageName} on testnet: ${mockGameHubId}\n`);
-// NOTE: Keep this block commented so we can re-enable mock deployment later if needed.
-// console.log(`Deploying ${mock.packageName}...`);
-// try {
-//   const result = await $`stellar contract deploy --wasm ${mock.wasmPath} --source admin --network ${NETWORK}`.text();
-//   mockGameHubId = result.trim();
-//   deployed[mock.packageName] = mockGameHubId;
-//   console.log(`✅ ${mock.packageName} deployed: ${mockGameHubId}\n`);
-// } catch (error) {
-//   console.error(`❌ Failed to deploy ${mock.packageName}:`, error);
-//   process.exit(1);
-// }
+if (await testnetContractExists(mockGameHubId)) {
+  deployed[mock.packageName] = mockGameHubId;
+  console.log(`✅ Using existing ${mock.packageName} on testnet: ${mockGameHubId}\n`);
+} else {
+  console.warn(`⚠️  ${mock.packageName} not found on testnet (archived or reset). Deploying a new one...`);
+  console.log(`Deploying ${mock.packageName}...`);
+  try {
+    const result =
+      await $`stellar contract deploy --wasm ${mock.wasmPath} --source-account ${adminSecret} --network ${NETWORK}`.text();
+    mockGameHubId = result.trim();
+    deployed[mock.packageName] = mockGameHubId;
+    console.log(`✅ ${mock.packageName} deployed: ${mockGameHubId}\n`);
+  } catch (error) {
+    console.error(`❌ Failed to deploy ${mock.packageName}:`, error);
+    process.exit(1);
+  }
+}
 
 for (const contract of contracts) {
   if (contract.isMockHub) continue;
@@ -200,13 +180,13 @@ for (const contract of contracts) {
   try {
     console.log("  Installing WASM...");
     const installResult =
-      await $`stellar contract install --wasm ${contract.wasmPath} --source admin --network ${NETWORK}`.text();
+      await $`stellar contract install --wasm ${contract.wasmPath} --source-account ${adminSecret} --network ${NETWORK}`.text();
     const wasmHash = installResult.trim();
     console.log(`  WASM hash: ${wasmHash}`);
 
     console.log("  Deploying and initializing...");
     const deployResult =
-      await $`stellar contract deploy --wasm-hash ${wasmHash} --source admin --network ${NETWORK} -- --admin ${adminAddress} --game-hub ${mockGameHubId}`.text();
+      await $`stellar contract deploy --wasm-hash ${wasmHash} --source-account ${adminSecret} --network ${NETWORK} -- --admin ${adminAddress} --game-hub ${mockGameHubId}`.text();
     const contractId = deployResult.trim();
     deployed[contract.packageName] = contractId;
     console.log(`✅ ${contract.packageName} deployed: ${contractId}\n`);
@@ -263,7 +243,6 @@ VITE_DEV_PLAYER1_ADDRESS=${walletAddresses.player1}
 VITE_DEV_PLAYER2_ADDRESS=${walletAddresses.player2}
 
 # Dev wallet secret keys (WARNING: Never commit this file!)
-VITE_DEV_ADMIN_SECRET=${walletSecrets.admin}
 VITE_DEV_PLAYER1_SECRET=${walletSecrets.player1}
 VITE_DEV_PLAYER2_SECRET=${walletSecrets.player2}
 `;

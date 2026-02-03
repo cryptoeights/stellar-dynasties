@@ -12,5 +12,8 @@
   },
   "devDependencies": {
     "@types/bun": "latest"
+  },
+  "dependencies": {
+    "@stellar/stellar-sdk": "^14.5.0"
   }
 }

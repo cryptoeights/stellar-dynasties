@@ -37,7 +37,7 @@ async function ensureTestnetAccountFunded(address: string): Promise<void> {
 
 export async function getSimulationSourceAddress(avoidAddresses: string[] = []): Promise<string> {
   const avoid = new Set(avoidAddresses.filter(Boolean));
-  // Prefer explicit runtime config, then admin as it is most likely to exist (created/funded via Stellar CLI during deploy).
+  // Prefer explicit runtime config, then admin as it is most likely to exist (created/funded during deploy).
   const candidates = [
     RUNTIME_SIMULATION_SOURCE,
     DEV_ADMIN_ADDRESS,

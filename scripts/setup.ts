@@ -99,14 +99,9 @@ if (existsSync('deployment.json')) {
 
 const existingEnv = await readEnvFile('.env');
 const walletSecrets = {
-  admin: getEnvValue(existingEnv, 'VITE_DEV_ADMIN_SECRET', 'NOT_AVAILABLE'),
   player1: getEnvValue(existingEnv, 'VITE_DEV_PLAYER1_SECRET', 'NOT_AVAILABLE'),
   player2: getEnvValue(existingEnv, 'VITE_DEV_PLAYER2_SECRET', 'NOT_AVAILABLE'),
 };
-
-if (walletSecrets.admin === 'NOT_AVAILABLE') {
-  console.warn("⚠️  Warning: Admin secret not available. Dev admin wallet actions may not work without a connected wallet.");
-}
 
 const missingIds: string[] = [];
 for (const contract of contracts) {
@@ -136,7 +131,6 @@ VITE_DEV_PLAYER1_ADDRESS=${wallets.player1}
 VITE_DEV_PLAYER2_ADDRESS=${wallets.player2}
 
 # Dev wallet secret keys (WARNING: Never commit this file!)
-VITE_DEV_ADMIN_SECRET=${walletSecrets.admin}
 VITE_DEV_PLAYER1_SECRET=${walletSecrets.player1}
 VITE_DEV_PLAYER2_SECRET=${walletSecrets.player2}
 `;
