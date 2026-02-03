@@ -45,8 +45,9 @@
   margin-bottom: 1.75rem;
 }
 
-.hero-actions button {
-  font-family: var(--font-display);
+.hero-actions button,
+.hero-actions .button {
+  font-family: var(--font-body);
   letter-spacing: 0.12em;
   text-transform: uppercase;
 }
@@ -124,6 +125,37 @@
   font-size: 0.75rem;
   color: rgba(255, 255, 255, 0.7);
   font-family: var(--font-display);
+}
+
+.panel-steps {
+  list-style: none;
+  display: grid;
+  gap: 0.6rem;
+  counter-reset: steps;
+  padding: 0;
+  margin: 0;
+}
+
+.panel-steps li {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.panel-steps li::before {
+  counter-increment: steps;
+  content: counter(steps);
+  width: 1.6rem;
+  height: 1.6rem;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: var(--color-accent);
+  color: var(--color-ink);
+  font-size: 0.85rem;
+  font-weight: 700;
 }
 
 .panel-footer {

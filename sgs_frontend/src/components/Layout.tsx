@@ -66,8 +66,7 @@ export function Layout({ children, currentPage, onNavigate }: LayoutProps) {
       <main className="studio-main">{children}</main>
 
       <footer className="studio-footer">
-        <span>Stellar Game Studio is an open-source starter kit for Soroban game developers.</span>
-        <span className="footer-meta">Host-ready docs at jamesbachini.github.io/Stellar-Game-Studio</span>
+        <span>Built with ♥️ for Stellar game developers</span>
       </footer>
     </div>
   );

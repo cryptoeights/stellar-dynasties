@@ -107,7 +107,7 @@
   text-transform: uppercase;
   letter-spacing: 0.16em;
   white-space: nowrap;
-  font-family: var(--font-display);
+  font-family: var(--font-body);
 }
 
 .switch-button:hover {

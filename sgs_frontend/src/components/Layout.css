@@ -28,7 +28,7 @@
 .orb-1 {
   top: -15%;
   left: -10%;
-  background: radial-gradient(circle at 35% 35%, rgba(242, 180, 65, 0.7), transparent 65%);
+  background: radial-gradient(circle at 35% 35%, rgba(253, 218, 36, 0.7), transparent 65%);
   animation-delay: 0s;
 }
 
@@ -80,7 +80,7 @@
 
 .brand-title {
   font-family: var(--font-serif);
-  font-size: clamp(2rem, 3vw + 1rem, 3.6rem);
+  font-size: clamp(1.8rem, 2.8vw + 0.9rem, 3.2rem);
   line-height: 1.05;
   margin: 0 0 0.5rem;
   text-wrap: balance;
@@ -116,7 +116,7 @@
   background: transparent;
   text-transform: uppercase;
   letter-spacing: 0.14em;
-  font-family: var(--font-display);
+  font-family: var(--font-body);
   box-shadow: none;
   transition: border-color 0.2s ease, background 0.2s ease;
 }

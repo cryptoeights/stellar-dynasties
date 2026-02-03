@@ -18,13 +18,13 @@
   --color-surface-warm: #f1e6d3;
   --color-ink: #121212;
   --color-ink-muted: #4b4b4b;
-  --color-accent: #f2b441;
+  --color-accent: #fdda24;
   --color-accent-strong: #0f4c3a;
   --color-highlight: #ffe3b3;
   --color-teal: #2bb6a1;
   --color-border: rgba(18, 18, 18, 0.12);
   --color-success: #2bb6a1;
-  --color-warning: #f2b441;
+  --color-warning: #fdda24;
   --color-error: #c8463b;
   --color-info: #1f5f8b;
   --radius-lg: 28px;
@@ -46,7 +46,7 @@ body {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   min-height: 100vh;
-  background: radial-gradient(1200px circle at 12% -10%, rgba(242, 180, 65, 0.2), transparent 65%),
+  background: radial-gradient(1200px circle at 12% -10%, rgba(253, 218, 36, 0.2), transparent 65%),
     radial-gradient(1000px circle at 85% 5%, rgba(43, 182, 161, 0.2), transparent 70%),
     var(--color-bg);
   color: var(--color-ink);
