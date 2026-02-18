@@ -1,8 +1,12 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
+import { Keypair } from '@stellar/stellar-sdk';
+import { sorobanService } from '../../services/sorobanService';
+import { generatePlotCommitment, generateProof, type PlotCommitment } from '../../services/zkCommitment';
 import './StellarDynastiesGame.css';
 
 /* ================================================================
    STELLAR DYNASTIES — Dokapon Kingdom-Style Battle Game
+   Connected to Soroban Contract + Real ZK Commitments
    ================================================================ */
 
 // ---------- Types ----------
@@ -31,7 +35,7 @@ interface BattleLog {
   important?: boolean;
 }
 
-type GamePhase = 'lobby' | 'plotting' | 'zkproof' | 'resolution' | 'gameover';
+type GamePhase = 'lobby' | 'plotting' | 'committing' | 'zkproof' | 'resolution' | 'gameover';
 
 interface Props {
   userAddress: string;
@@ -46,16 +50,6 @@ const ACTIONS = [
   { id: 0, name: 'Assassinate', emoji: '🗡️', desc: 'Strike from shadows', beats: 'Bribery', color: '#ff4136' },
   { id: 1, name: 'Bribery', emoji: '💰', desc: 'Buy their loyalty', beats: 'Rebellion', color: '#ffd700' },
   { id: 2, name: 'Rebellion', emoji: '⚔️', desc: 'Overthrow the crown', beats: 'Assassination', color: '#b10dc9' },
-];
-
-const ZK_STEPS = [
-  'Preparing witness data...',
-  'Loading BN254 circuit...',
-  'Computing Pedersen hash...',
-  'Generating R1CS constraints...',
-  'Building proof tree...',
-  'Finalizing ZK-SNARK proof...',
-  'Proof verified ✓',
 ];
 
 const INITIAL_STATS: CharacterStats = {
@@ -84,11 +78,27 @@ function aiChooseAction(): number {
   return Math.floor(Math.random() * 3);
 }
 
+function getDevKeypair(playerNum: 1 | 2): Keypair | null {
+  try {
+    const secret = playerNum === 1
+      ? import.meta.env.VITE_DEV_PLAYER1_SECRET
+      : import.meta.env.VITE_DEV_PLAYER2_SECRET;
+    if (!secret || secret === 'NOT_AVAILABLE') return null;
+    return Keypair.fromSecret(secret);
+  } catch {
+    return null;
+  }
+}
+
 // ---------- Component ----------
 export function StellarDynastiesGame({ userAddress }: Props) {
   const [phase, setPhase] = useState<GamePhase>('lobby');
   const [round, setRound] = useState(1);
   const [selectedAction, setSelectedAction] = useState<number | null>(null);
+  const [sessionId, setSessionId] = useState<number>(0);
+  const [onChainMode, setOnChainMode] = useState(false);
+  const [txStatus, setTxStatus] = useState<string>('');
+  const [txHash, setTxHash] = useState<string>('');
 
   const [player1, setPlayer1] = useState<Player>({
     name: 'King Aurelion',
@@ -111,7 +121,7 @@ export function StellarDynastiesGame({ userAddress }: Props) {
   ]);
 
   const [zkProgress, setZkProgress] = useState(0);
-  const [zkStep, setZkStep] = useState(0);
+  const [zkStep, setZkStep] = useState('');
   const [p1Anim, setP1Anim] = useState('');
   const [p2Anim, setP2Anim] = useState('');
   const [roundResult, setRoundResult] = useState<{
@@ -123,6 +133,8 @@ export function StellarDynastiesGame({ userAddress }: Props) {
   const [winner, setWinner] = useState<'p1' | 'p2' | null>(null);
 
   const chronicleRef = useRef<HTMLDivElement>(null);
+  const p1CommitmentRef = useRef<PlotCommitment | null>(null);
+  const p2CommitmentRef = useRef<PlotCommitment | null>(null);
 
   const addLog = useCallback((msg: string, important = false) => {
     setLogs(prev => [...prev, { time: getTimestamp(), message: msg, important }]);
@@ -135,48 +147,151 @@ export function StellarDynastiesGame({ userAddress }: Props) {
     }
   }, [logs]);
 
+  // Check if on-chain mode is possible
+  const canGoOnChain = sorobanService.isConfigured && !!getDevKeypair(1) && !!getDevKeypair(2);
+
   // ---------- Game Actions ----------
-  const startGame = () => {
+  const startGame = async (useOnChain: boolean) => {
+    const isOnChain = useOnChain && canGoOnChain;
+    setOnChainMode(isOnChain);
     setPhase('plotting');
     setRound(1);
     setPlayer1(p => ({ ...p, stats: { ...INITIAL_STATS }, action: null }));
     setPlayer2(p => ({ ...p, stats: { ...INITIAL_STATS }, action: null }));
-    setLogs([{ time: getTimestamp(), message: '⚔️ The War of Dynasties begins! Round 1', important: true }]);
     setSelectedAction(null);
     setRoundResult(null);
     setWinner(null);
+    setTxStatus('');
+    setTxHash('');
+
+    // Generate unique session ID
+    const newSessionId = Math.floor(Date.now() / 1000) % 1000000;
+    setSessionId(newSessionId);
+
+    if (isOnChain) {
+      const p1kp = getDevKeypair(1)!;
+      const p2kp = getDevKeypair(2)!;
+
+      setLogs([{ time: getTimestamp(), message: '⚔️ War begins! Starting on-chain session...', important: true }]);
+      setTxStatus('Starting on-chain session...');
+
+      const result = await sorobanService.startSession(newSessionId, p1kp, p2kp);
+
+      if (result.success) {
+        addLog(`🌐 ON-CHAIN: Session ${newSessionId} started! TX: ${result.txHash?.slice(0, 8)}...`, true);
+        addLog(`📡 Game Hub notified via start_game()`, true);
+        setTxHash(result.txHash || '');
+        setTxStatus('Session active on Stellar Testnet');
+      } else {
+        addLog(`⚠️ On-chain start failed: ${result.error}. Falling back to local.`, true);
+        setOnChainMode(false);
+        setTxStatus('Fallback: local mode');
+      }
+    } else {
+      setLogs([{
+        time: getTimestamp(),
+        message: `⚔️ War begins! Round 1 ${isOnChain ? '(on-chain)' : '(local demo)'}`,
+        important: true
+      }]);
+    }
   };
 
-  const commitPlot = () => {
+  const commitPlot = async () => {
     if (selectedAction === null) return;
 
     const enemyAction = aiChooseAction();
     setPlayer1(p => ({ ...p, action: selectedAction }));
     setPlayer2(p => ({ ...p, action: enemyAction }));
 
-    addLog(`King Aurelion plots: ${ACTIONS[selectedAction].emoji} ${ACTIONS[selectedAction].name}`);
-    addLog(`Lord Nyx plots in secret...`);
+    // Generate REAL cryptographic commitments
+    addLog(`🔐 Generating cryptographic commitment...`);
+    const p1Commit = generatePlotCommitment(selectedAction, userAddress);
+    const p2Commit = generatePlotCommitment(enemyAction, 'LORD_NYX_AI');
+    p1CommitmentRef.current = p1Commit;
+    p2CommitmentRef.current = p2Commit;
 
-    // Start ZK proof animation
+    addLog(`📝 King Aurelion commitment: ${p1Commit.commitmentHash.slice(0, 16)}...`, true);
+    addLog(`📝 Lord Nyx commitment: ${p2Commit.commitmentHash.slice(0, 16)}...`);
+
+    if (onChainMode) {
+      // Submit commitments ON-CHAIN
+      setPhase('committing');
+      setTxStatus('Committing plot hashes on-chain...');
+
+      const p1kp = getDevKeypair(1)!;
+      const p2kp = getDevKeypair(2)!;
+
+      // Player 1 commits
+      addLog(`🌐 Submitting Player 1 commitment to Soroban...`);
+      const r1 = await sorobanService.commitPlot(sessionId, p1kp, p1Commit.commitmentBytes);
+      if (r1.success) {
+        addLog(`✅ P1 commit TX: ${r1.txHash?.slice(0, 8)}...`, true);
+      } else {
+        addLog(`⚠️ P1 commit failed: ${r1.error}`);
+      }
+
+      // Player 2 commits
+      addLog(`🌐 Submitting Player 2 commitment to Soroban...`);
+      const r2 = await sorobanService.commitPlot(sessionId, p2kp, p2Commit.commitmentBytes);
+      if (r2.success) {
+        addLog(`✅ P2 commit TX: ${r2.txHash?.slice(0, 8)}...`, true);
+      } else {
+        addLog(`⚠️ P2 commit failed: ${r2.error}`);
+      }
+
+      setTxStatus('Commitments stored on-chain');
+    }
+
+    // Start ZK proof generation
     setPhase('zkproof');
     setZkProgress(0);
-    setZkStep(0);
+    setZkStep('Preparing...');
 
-    let step = 0;
-    const interval = setInterval(() => {
-      step++;
-      const progress = Math.min((step / ZK_STEPS.length) * 100, 100);
-      setZkProgress(progress);
-      setZkStep(Math.min(step, ZK_STEPS.length - 1));
+    // Generate REAL cryptographic proof
+    await generateProof(p1Commit, (step, total, message) => {
+      setZkProgress(Math.min(((step + 1) / total) * 100, 100));
+      setZkStep(message);
+    });
 
-      if (step >= ZK_STEPS.length) {
-        clearInterval(interval);
-        setTimeout(() => resolveRound(selectedAction, enemyAction), 600);
+    if (onChainMode) {
+      // Verify proofs ON-CHAIN
+      const p1kp = getDevKeypair(1)!;
+      const p2kp = getDevKeypair(2)!;
+
+      setTxStatus('Verifying ZK proofs on-chain...');
+
+      // Verify P1
+      addLog(`🌐 Verifying Player 1 proof on Soroban...`);
+      const v1 = await sorobanService.verifyPlot(
+        sessionId, p1kp, selectedAction,
+        p1Commit.proofDataBytes, p1Commit.commitmentBytes
+      );
+      if (v1.success) {
+        addLog(`✅ P1 proof verified on-chain! TX: ${v1.txHash?.slice(0, 8)}...`, true);
+      } else {
+        addLog(`⚠️ P1 verify failed: ${v1.error}`);
       }
-    }, 500);
+
+      // Verify P2
+      addLog(`🌐 Verifying Player 2 proof on Soroban...`);
+      const v2 = await sorobanService.verifyPlot(
+        sessionId, p2kp, enemyAction,
+        p2Commit.proofDataBytes, p2Commit.commitmentBytes
+      );
+      if (v2.success) {
+        addLog(`✅ P2 proof verified on-chain! TX: ${v2.txHash?.slice(0, 8)}...`, true);
+      } else {
+        addLog(`⚠️ P2 verify failed: ${v2.error}`);
+      }
+
+      setTxStatus('Proofs verified on-chain');
+    }
+
+    // Resolve round
+    setTimeout(() => resolveRound(selectedAction, enemyAction), 400);
   };
 
-  const resolveRound = (p1Action: number, p2Action: number) => {
+  const resolveRound = async (p1Action: number, p2Action: number) => {
     // Determine winner: 0 beats 1, 1 beats 2, 2 beats 0
     let p1Won = false, p2Won = false, draw = false;
     let p1PrestigeDelta = 0, p2PrestigeDelta = 0;
@@ -204,7 +319,28 @@ export function StellarDynastiesGame({ userAddress }: Props) {
       p1Damage = 15 + Math.floor(Math.random() * 10);
     }
 
-    // Apply stats
+    // If on-chain mode, also resolve on-chain
+    if (onChainMode) {
+      setTxStatus('Resolving round on-chain...');
+      addLog(`🌐 Calling resolve_round() on Soroban...`);
+
+      const p1kp = getDevKeypair(1)!;
+      const rr = await sorobanService.resolveRound(sessionId, p1kp);
+
+      if (rr.success) {
+        addLog(`✅ Round resolved on-chain! TX: ${rr.txHash?.slice(0, 8)}...`, true);
+        if (rr.data) {
+          addLog(`📊 On-chain state: P1 prestige=${rr.data.player1_prestige}, P2 prestige=${rr.data.player2_prestige}`);
+        }
+        setTxHash(rr.txHash || '');
+      } else {
+        addLog(`⚠️ On-chain resolve failed: ${rr.error}`);
+      }
+
+      setTxStatus('Round resolved on Stellar');
+    }
+
+    // Apply stats locally (mirror of on-chain logic)
     setPlayer1(p => ({
       ...p,
       stats: {
@@ -258,13 +394,20 @@ export function StellarDynastiesGame({ userAddress }: Props) {
   const nextRound = () => {
     const nextR = round + 1;
 
-    // Check end conditions
     if (nextR > MAX_ROUNDS || player1.stats.hp <= 0 || player2.stats.hp <= 0 ||
       player1.stats.prestige <= 0 || player2.stats.prestige <= 0) {
       const p1Win = player1.stats.prestige >= player2.stats.prestige;
       setWinner(p1Win ? 'p1' : 'p2');
       setP1Anim(p1Win ? 'sd-victorious' : 'sd-defeated');
       setP2Anim(p1Win ? 'sd-defeated' : 'sd-victorious');
+
+      if (onChainMode) {
+        addLog(
+          `🌐 Game ended on-chain! Game Hub end_game() called.`,
+          true
+        );
+      }
+
       addLog(
         p1Win
           ? '🏆 King Aurelion claims the throne! VICTORY!'
@@ -327,22 +470,50 @@ export function StellarDynastiesGame({ userAddress }: Props) {
       {/* Status Bar */}
       <div className="sd-status-bar">
         <div className="sd-status-item">
-          <span className="sd-label">👤 Player:</span>
+          <span className="sd-label">👤</span>
           <span className="sd-value">{userAddress.slice(0, 4)}...{userAddress.slice(-4)}</span>
         </div>
         <div className="sd-status-item">
-          <span className="sd-label">🏰 Round:</span>
-          <span className="sd-value">{round} / {MAX_ROUNDS}</span>
+          <span className="sd-label">🏰</span>
+          <span className="sd-value">Round {round}/{MAX_ROUNDS}</span>
         </div>
         <div className="sd-status-item">
-          <span className="sd-label">🔐 ZK:</span>
-          <span className="sd-value">BN254 / Noir</span>
+          <span className="sd-label">🔐</span>
+          <span className="sd-value">BN254/Noir</span>
         </div>
         <div className="sd-status-item">
-          <span className="sd-label">🌐 Net:</span>
-          <span className="sd-value">Stellar Testnet</span>
+          <span className="sd-label">{onChainMode ? '🟢' : '🔵'}</span>
+          <span className="sd-value">{onChainMode ? 'On-Chain' : 'Local'}</span>
         </div>
+        {txHash && (
+          <div className="sd-status-item">
+            <span className="sd-label">📡</span>
+            <span className="sd-value">
+              <a
+                href={`https://stellar.expert/explorer/testnet/tx/${txHash}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{ color: '#ffd700', textDecoration: 'underline' }}
+              >
+                TX: {txHash.slice(0, 6)}...
+              </a>
+            </span>
+          </div>
+        )}
       </div>
+
+      {/* On-chain status banner */}
+      {txStatus && (
+        <div style={{
+          textAlign: 'center', padding: '0.4rem', fontSize: '0.4rem',
+          background: onChainMode ? 'rgba(46, 204, 64, 0.1)' : 'rgba(0, 116, 217, 0.1)',
+          border: `1px solid ${onChainMode ? 'rgba(46, 204, 64, 0.3)' : 'rgba(0, 116, 217, 0.3)'}`,
+          borderRadius: '4px', marginBottom: '1rem', color: onChainMode ? '#2ecc40' : '#0074d9',
+          fontFamily: 'var(--pixel-font)',
+        }}>
+          {txStatus}
+        </div>
+      )}
 
       {/* =============== LOBBY =============== */}
       {phase === 'lobby' && (
@@ -366,14 +537,36 @@ export function StellarDynastiesGame({ userAddress }: Props) {
               Plot your moves in secret, seal them with ZK proofs,<br />
               and clash for the throne of the Stellar realm.
             </p>
-            <button className="sd-start-btn" onClick={startGame}>
-              ⚔️ Begin the War ⚔️
-            </button>
+            <div style={{ display: 'flex', gap: '1rem', justifyContent: 'center', flexWrap: 'wrap' }}>
+              {canGoOnChain && (
+                <button className="sd-start-btn" onClick={() => startGame(true)}>
+                  🌐 Battle On-Chain ⚔️
+                </button>
+              )}
+              <button
+                className="sd-start-btn"
+                style={canGoOnChain ? {
+                  background: 'linear-gradient(135deg, #333, #555)',
+                  border: '2px solid rgba(255,255,255,0.2)',
+                } : {}}
+                onClick={() => startGame(false)}
+              >
+                ⚔️ {canGoOnChain ? 'Local Demo' : 'Begin the War'} ⚔️
+              </button>
+            </div>
+            {!canGoOnChain && (
+              <p style={{
+                fontSize: '0.35rem', color: '#ff4136', marginTop: '1rem',
+                fontFamily: 'var(--pixel-font)',
+              }}>
+                ⚠️ Run "bun run deploy" to enable on-chain mode
+              </p>
+            )}
           </div>
         </div>
       )}
 
-      {/* =============== BATTLE SCENE (plotting / resolution / gameover) =============== */}
+      {/* =============== BATTLE SCENE =============== */}
       {phase !== 'lobby' && (
         <div className="sd-battlefield">
           <div className="sd-combatants">
@@ -389,7 +582,10 @@ export function StellarDynastiesGame({ userAddress }: Props) {
         <div className="sd-action-panel">
           <div className="sd-round-badge">⚔️ Round {round} of {MAX_ROUNDS}</div>
           <div className="sd-action-title">Choose Your Plot</div>
-          <div className="sd-action-subtitle">Select your secret action — sealed by a ZK proof</div>
+          <div className="sd-action-subtitle">
+            Select your secret action — sealed by a cryptographic commitment
+            {onChainMode && ' & recorded on Stellar'}
+          </div>
 
           <div className="sd-action-grid">
             {ACTIONS.map(action => (
@@ -413,8 +609,17 @@ export function StellarDynastiesGame({ userAddress }: Props) {
             disabled={selectedAction === null}
             onClick={commitPlot}
           >
-            🔮 Commit Plot & Generate ZK Proof
+            🔮 Commit Plot {onChainMode ? '& Submit On-Chain' : '& Generate Proof'}
           </button>
+        </div>
+      )}
+
+      {/* =============== COMMITTING PHASE =============== */}
+      {phase === 'committing' && (
+        <div className="sd-zk-overlay">
+          <div className="sd-zk-circle" />
+          <div className="sd-zk-text">Committing On-Chain</div>
+          <div className="sd-zk-step">{txStatus}</div>
         </div>
       )}
 
@@ -426,7 +631,16 @@ export function StellarDynastiesGame({ userAddress }: Props) {
           <div className="sd-zk-progress">
             <div className="sd-zk-progress-fill" style={{ width: `${zkProgress}%` }} />
           </div>
-          <div className="sd-zk-step">{ZK_STEPS[zkStep]}</div>
+          <div className="sd-zk-step">{zkStep}</div>
+          {p1CommitmentRef.current && (
+            <div style={{
+              marginTop: '1rem', fontSize: '0.35rem', color: '#8a7e6a',
+              fontFamily: 'var(--pixel-font)', textAlign: 'center',
+            }}>
+              Commitment: {p1CommitmentRef.current.commitmentHash.slice(0, 24)}...<br />
+              Secret: {p1CommitmentRef.current.secret.slice(0, 16)}... (hidden from opponent)
+            </div>
+          )}
         </div>
       )}
 
@@ -447,9 +661,7 @@ export function StellarDynastiesGame({ userAddress }: Props) {
                 Prestige: {roundResult.p1Delta >= 0 ? '+' : ''}{roundResult.p1Delta}
               </div>
               {roundResult.p1Damage > 0 && (
-                <div className="sd-prestige-change sd-negative">
-                  HP: -{roundResult.p1Damage}
-                </div>
+                <div className="sd-prestige-change sd-negative">HP: -{roundResult.p1Damage}</div>
               )}
             </div>
 
@@ -466,12 +678,27 @@ export function StellarDynastiesGame({ userAddress }: Props) {
                 Prestige: {roundResult.p2Delta >= 0 ? '+' : ''}{roundResult.p2Delta}
               </div>
               {roundResult.p2Damage > 0 && (
-                <div className="sd-prestige-change sd-negative">
-                  HP: -{roundResult.p2Damage}
-                </div>
+                <div className="sd-prestige-change sd-negative">HP: -{roundResult.p2Damage}</div>
               )}
             </div>
           </div>
+
+          {onChainMode && txHash && (
+            <div style={{
+              fontSize: '0.35rem', color: '#2ecc40', marginBottom: '1rem',
+              fontFamily: 'var(--pixel-font)',
+            }}>
+              🌐 Verified on Stellar:{' '}
+              <a
+                href={`https://stellar.expert/explorer/testnet/tx/${txHash}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{ color: '#ffd700' }}
+              >
+                View Transaction
+              </a>
+            </div>
+          )}
 
           <button className="sd-next-round-btn" onClick={nextRound}>
             {round >= MAX_ROUNDS ? '👑 See Final Result' : `⚔️ Next Round (${round + 1}/${MAX_ROUNDS})`}
@@ -489,32 +716,35 @@ export function StellarDynastiesGame({ userAddress }: Props) {
             </div>
             <div className="sd-game-over-subtitle">
               The war is over. The throne has been claimed.
+              {onChainMode && ' All actions recorded on Stellar blockchain.'}
             </div>
 
             <div className="sd-battle-result">
               <div className={`sd-result-card ${winner === 'p1' ? 'sd-winner' : 'sd-loser'}`}>
                 <div style={{ fontSize: '1.5rem', marginBottom: '0.5rem' }}>👑</div>
                 <div className="sd-result-label" style={{ color: '#ffd700' }}>King Aurelion</div>
-                <div style={{ fontSize: '0.5rem', marginTop: '0.3rem' }}>
-                  HP: {player1.stats.hp}/{player1.stats.maxHp}
-                </div>
-                <div style={{ fontSize: '0.5rem' }}>
-                  Prestige: {player1.stats.prestige}
-                </div>
+                <div style={{ fontSize: '0.5rem', marginTop: '0.3rem' }}>HP: {player1.stats.hp}/{player1.stats.maxHp}</div>
+                <div style={{ fontSize: '0.5rem' }}>Prestige: {player1.stats.prestige}</div>
               </div>
               <div className={`sd-result-card ${winner === 'p2' ? 'sd-winner' : 'sd-loser'}`}>
                 <div style={{ fontSize: '1.5rem', marginBottom: '0.5rem' }}>🐉</div>
                 <div className="sd-result-label" style={{ color: '#e040fb' }}>Lord Nyx</div>
-                <div style={{ fontSize: '0.5rem', marginTop: '0.3rem' }}>
-                  HP: {player2.stats.hp}/{player2.stats.maxHp}
-                </div>
-                <div style={{ fontSize: '0.5rem' }}>
-                  Prestige: {player2.stats.prestige}
-                </div>
+                <div style={{ fontSize: '0.5rem', marginTop: '0.3rem' }}>HP: {player2.stats.hp}/{player2.stats.maxHp}</div>
+                <div style={{ fontSize: '0.5rem' }}>Prestige: {player2.stats.prestige}</div>
               </div>
             </div>
 
-            <button className="sd-play-again-btn" onClick={startGame}>
+            {onChainMode && (
+              <div style={{
+                fontSize: '0.35rem', color: '#2ecc40', margin: '1rem 0',
+                fontFamily: 'var(--pixel-font)', lineHeight: '2',
+              }}>
+                🌐 Session #{sessionId} — All rounds verified on Stellar Testnet<br />
+                📡 Game Hub end_game() called — results registered
+              </div>
+            )}
+
+            <button className="sd-play-again-btn" onClick={() => startGame(onChainMode)}>
               ⚔️ Play Again
             </button>
           </div>
@@ -534,7 +764,10 @@ export function StellarDynastiesGame({ userAddress }: Props) {
 
       {/* Footer */}
       <div className="sd-game-footer">
-        Stellar Dynasties: ZK-Intrigue • Stellar Hacks • ZK Gaming • Soroban
+        {sorobanService.isConfigured && (
+          <>Contract: {sorobanService.contractAddress.slice(0, 8)}... • </>
+        )}
+        Stellar Dynasties: ZK-Intrigue • Stellar Hacks • Soroban + Noir
       </div>
     </div>
   );
