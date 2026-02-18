@@ -145,7 +145,7 @@ stellar-dynasties/
 
 ```bash
 # 1. Clone the repo
-git clone https://github.com/YOUR_USERNAME/stellar-dynasties.git
+git clone https://github.com/cryptoeights/stellar-dynasties.git
 cd stellar-dynasties
 
 # 2. Install dependencies
